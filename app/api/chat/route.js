@@ -9,15 +9,17 @@ const MODELS = [
 const SYSTEM_PROMPT = `
 You are CHALU, a helpful, intelligent and reliable AI assistant.
 
-Your goals:
+Rules:
 - Give clear, useful and practical answers.
-- Match the user's language. If the user writes Bangla, reply naturally in Bangla.
-- If the user writes Banglish, you may reply in Banglish when appropriate.
-- Be concise when the question is simple and detailed when the question requires it.
+- Match the user's language.
+- If the user writes Bangla, reply naturally in Bangla.
+- If the user writes Banglish, you may reply in Banglish.
+- Be concise for simple questions and detailed when necessary.
 - Do not pretend to know something you do not know.
-- For important or uncertain information, clearly mention uncertainty.
-- Maintain the context of the current conversation.
+- Maintain the conversation context.
 `;
+
+const REQUEST_TIMEOUT = 30000;
 
 export async function POST(request) {
   try {
@@ -25,39 +27,50 @@ export async function POST(request) {
 
     if (!apiKey) {
       return NextResponse.json(
-        { error: "Gemini API key is not configured yet." },
+        {
+          error: "Gemini API key is not configured in Vercel."
+        },
         { status: 500 }
       );
     }
 
-    const { messages = [] } = await request.json();
+    const body = await request.json();
+    const messages = body?.messages;
 
     if (!Array.isArray(messages) || messages.length === 0) {
       return NextResponse.json(
-        { error: "Please enter a message." },
+        {
+          error: "Please enter a message."
+        },
         { status: 400 }
       );
     }
 
     const contents = messages
       .filter(
-        (m) =>
-          (m.role === "user" || m.role === "assistant") &&
-          typeof m.content === "string" &&
-          m.content.trim()
+        (message) =>
+          (message.role === "user" ||
+            message.role === "assistant") &&
+          typeof message.content === "string" &&
+          message.content.trim()
       )
-      .map((m) => ({
-        role: m.role === "assistant" ? "model" : "user",
+      .map((message) => ({
+        role:
+          message.role === "assistant"
+            ? "model"
+            : "user",
         parts: [
           {
-            text: m.content.slice(0, 20000),
-          },
-        ],
+            text: message.content.slice(0, 20000)
+          }
+        ]
       }));
 
-    if (!contents.length) {
+    if (contents.length === 0) {
       return NextResponse.json(
-        { error: "Please enter a message." },
+        {
+          error: "No valid message was received."
+        },
         { status: 400 }
       );
     }
@@ -65,37 +78,47 @@ export async function POST(request) {
     let lastError = "Gemini request failed.";
 
     for (const model of MODELS) {
+      const controller = new AbortController();
+
+      const timeout = setTimeout(() => {
+        controller.abort();
+      }, REQUEST_TIMEOUT);
+
       try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-            apiKey
-          )}`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
+        const url =
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent` +
+          `?key=${encodeURIComponent(apiKey)}`;
+
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            systemInstruction: {
+              parts: [
+                {
+                  text: SYSTEM_PROMPT
+                }
+              ]
             },
-            body: JSON.stringify({
-              systemInstruction: {
-                parts: [{ text: SYSTEM_PROMPT }],
-              },
-              contents,
-              generationConfig: {
-                temperature: 0.7,
-                maxOutputTokens: 4096,
-              },
-            }),
-          }
-        );
+
+            contents,
+
+            generationConfig: {
+              maxOutputTokens: 4096
+            }
+          })
+        });
 
         const data = await response.json();
 
         if (!response.ok) {
           lastError =
             data?.error?.message ||
-            `Gemini request failed (${response.status}).`;
+            `Gemini returned HTTP ${response.status}.`;
 
-          // Try the next model for temporary availability/rate-limit errors.
           if (
             response.status === 429 ||
             response.status === 500 ||
@@ -107,41 +130,59 @@ export async function POST(request) {
           }
 
           return NextResponse.json(
-            { error: lastError },
-            { status: response.status }
+            {
+              error: lastError,
+              model
+            },
+            {
+              status: response.status
+            }
           );
         }
 
-        const text = data?.candidates?.[0]?.content?.parts
-          ?.map((part) => part.text || "")
-          .join("")
-          .trim();
+        const text =
+          data?.candidates?.[0]?.content?.parts
+            ?.map((part) => part?.text || "")
+            .join("")
+            .trim();
 
         if (text) {
           return NextResponse.json({
             text,
-            model,
+            model
           });
         }
 
-        lastError = "Gemini returned an empty response.";
+        lastError =
+          "Gemini returned an empty response.";
       } catch (error) {
-        lastError = error?.message || "Unexpected Gemini error.";
+        if (error?.name === "AbortError") {
+          lastError =
+            `${model} timed out after 30 seconds.`;
+        } else {
+          lastError =
+            error?.message ||
+            "Unexpected Gemini error.";
+        }
+      } finally {
+        clearTimeout(timeout);
       }
     }
 
     return NextResponse.json(
       {
         error:
-          "CHALU is temporarily unable to reach Gemini. Please try again in a moment.",
-        details: lastError,
+          "CHALU could not get a response from Gemini.",
+        details: lastError
       },
       { status: 503 }
     );
   } catch (error) {
     return NextResponse.json(
       {
-        error: error?.message || "Unexpected server error.",
+        error:
+          error?.message ||
+          "Unexpected server error."
       },
       { status: 500 }
     );
