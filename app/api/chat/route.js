@@ -1,78 +1,19 @@
 import { NextResponse } from "next/server";
 
-const MODEL = "gemini-3.8-flash";
+const MODEL = "gemini-2.5-flash";
 
 const SYSTEM_PROMPT = `
-You are CHALU, a helpful, intelligent and reliable AI assistant.
+You are CHALU, a helpful and intelligent AI assistant.
 
 Rules:
-- Give clear, useful and practical answers.
+- Answer clearly and accurately.
 - Match the user's language.
-- If the user writes Bangla, reply naturally in Bangla.
-- If the user writes Banglish, you may reply in Banglish.
-- Be concise for simple questions and detailed when necessary.
-- Support Markdown formatting when useful, including headings, bold text, bullet lists, numbered lists, code blocks and tables.
-- Maintain the conversation context.
-- Do not pretend to know something you do not know.
+- If the user writes Bangla, answer naturally in Bangla.
+- If the user writes Banglish, you may answer in Banglish.
+- Maintain conversation context.
+- Use Markdown when useful.
+- Support headings, bold text, bullet lists, numbered lists, code blocks and tables.
 `;
-
-const REQUEST_TIMEOUT = 30000;
-
-function buildContents(messages) {
-  const valid = messages
-    .filter(
-      (message) =>
-        (message.role === "user" ||
-          message.role === "assistant") &&
-        typeof message.content === "string" &&
-        message.content.trim()
-    )
-    .map((message) => ({
-      role:
-        message.role === "assistant"
-          ? "model"
-          : "user",
-      text: message.content.trim().slice(0, 20000)
-    }));
-
-  const contents = [];
-
-  for (const message of valid) {
-    const last = contents[contents.length - 1];
-
-    if (last && last.role === message.role) {
-      last.parts[0].text += "\n\n" + message.text;
-    } else {
-      contents.push({
-        role: message.role,
-        parts: [
-          {
-            text: message.text
-          }
-        ]
-      });
-    }
-  }
-
-  // Gemini conversations should start with a user turn.
-  while (
-    contents.length &&
-    contents[0].role !== "user"
-  ) {
-    contents.shift();
-  }
-
-  // Never send an incomplete trailing model turn.
-  if (
-    contents.length &&
-    contents[contents.length - 1].role ===
-      "model"
-  ) {
-    contents.pop();
-  }
-
-  return contents;
-}
 
 export async function POST(request) {
   try {
@@ -80,58 +21,73 @@ export async function POST(request) {
 
     if (!apiKey) {
       return NextResponse.json(
-        {
-          error:
-            "Gemini API key is not configured in Vercel."
-        },
+        { error: "Gemini API key is not configured." },
         { status: 500 }
       );
     }
 
-    const body = await request.json();
-    const messages = body?.messages;
+    const { messages } = await request.json();
 
-    if (
-      !Array.isArray(messages) ||
-      messages.length === 0
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return NextResponse.json(
+        { error: "Please enter a message." },
+        { status: 400 }
+      );
+    }
+
+    const contents = messages
+      .filter(
+        (message) =>
+          (message.role === "user" ||
+            message.role === "assistant") &&
+          typeof message.content === "string" &&
+          message.content.trim()
+      )
+      .map((message) => ({
+        role:
+          message.role === "assistant"
+            ? "model"
+            : "user",
+        parts: [
+          {
+            text: message.content
+              .trim()
+              .slice(0, 12000)
+          }
+        ]
+      }));
+
+    if (!contents.length) {
+      return NextResponse.json(
+        { error: "No valid message found." },
+        { status: 400 }
+      );
+    }
+
+    // Make sure the conversation starts with a user message.
+    while (
+      contents.length > 0 &&
+      contents[0].role !== "user"
     ) {
-      return NextResponse.json(
-        {
-          error: "Please enter a message."
-        },
-        { status: 400 }
-      );
+      contents.shift();
     }
 
-    const contents = buildContents(messages);
-
-    if (contents.length === 0) {
-      return NextResponse.json(
-        {
-          error:
-            "No valid conversation messages were received."
-        },
-        { status: 400 }
-      );
+    // Remove trailing model message.
+    if (
+      contents.length > 0 &&
+      contents[contents.length - 1].role ===
+        "model"
+    ) {
+      contents.pop();
     }
 
-    const controller = new AbortController();
-
-    const timeout = setTimeout(() => {
-      controller.abort();
-    }, REQUEST_TIMEOUT);
-
-    try {
-      const url =
-        `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent` +
-        `?key=${encodeURIComponent(apiKey)}`;
-
-      const response = await fetch(url, {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        signal: controller.signal,
         body: JSON.stringify({
           systemInstruction: {
             parts: [
@@ -140,81 +96,52 @@ export async function POST(request) {
               }
             ]
           },
-
           contents,
-
           generationConfig: {
-            maxOutputTokens: 4096
+            maxOutputTokens: 2048
           }
-        })
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        const errorMessage =
-          data?.error?.message ||
-          `Gemini returned HTTP ${response.status}.`;
-
-        return NextResponse.json(
-          {
-            error: errorMessage,
-            status: response.status
-          },
-          {
-            status: response.status
-          }
-        );
+        }),
+        cache: "no-store"
       }
+    );
 
-      const text =
-        data?.candidates?.[0]?.content?.parts
-          ?.map((part) => part?.text || "")
-          .join("")
-          .trim();
+    const data = await response.json();
 
-      if (!text) {
-        return NextResponse.json(
-          {
-            error:
-              "Gemini returned an empty response."
-          },
-          { status: 502 }
-        );
-      }
-
-      return NextResponse.json({
-        text,
-        model: MODEL
-      });
-    } catch (error) {
-      if (error?.name === "AbortError") {
-        return NextResponse.json(
-          {
-            error:
-              "Gemini request timed out after 30 seconds."
-          },
-          { status: 504 }
-        );
-      }
-
+    if (!response.ok) {
       return NextResponse.json(
         {
           error:
-            error?.message ||
-            "Unable to connect to Gemini."
+            data?.error?.message ||
+            `Gemini returned HTTP ${response.status}.`
         },
-        { status: 500 }
+        { status: response.status }
       );
-    } finally {
-      clearTimeout(timeout);
     }
+
+    const text = data?.candidates?.[0]?.content?.parts
+      ?.map((part) => part?.text || "")
+      .join("")
+      .trim();
+
+    if (!text) {
+      return NextResponse.json(
+        {
+          error: "Gemini returned an empty response."
+        },
+        { status: 502 }
+      );
+    }
+
+    return NextResponse.json({
+      text,
+      model: MODEL
+    });
   } catch (error) {
     return NextResponse.json(
       {
         error:
           error?.message ||
-          "Unexpected server error."
+          "Unable to connect to Gemini."
       },
       { status: 500 }
     );
