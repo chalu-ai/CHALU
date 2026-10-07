@@ -9,14 +9,323 @@ const prompts = [
   "Analyze this idea and suggest improvements."
 ];
 
+function escapeHtml(text) {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function formatInline(text) {
+  let value = escapeHtml(text);
+
+  value = value.replace(
+    /`([^`]+)`/g,
+    '<code class="inline-code">$1</code>'
+  );
+
+  value = value.replace(
+    /\*\*([^*]+)\*\*/g,
+    "<strong>$1</strong>"
+  );
+
+  value = value.replace(
+    /__([^_]+)__/g,
+    "<strong>$1</strong>"
+  );
+
+  value = value.replace(
+    /(?<!\*)\*([^*]+)\*(?!\*)/g,
+    "<em>$1</em>"
+  );
+
+  value = value.replace(
+    /(?<!_)_([^_]+)_(?!_)/g,
+    "<em>$1</em>"
+  );
+
+  value = value.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
+  );
+
+  value = value.replace(
+    /(^|[\s>])(https?:\/\/[^\s<]+)/g,
+    '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>'
+  );
+
+  return value;
+}
+
+function MarkdownTable({ lines }) {
+  if (lines.length < 2) return null;
+
+  const parseRow = (line) =>
+    line
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((cell) => cell.trim());
+
+  const headers = parseRow(lines[0]);
+
+  const rows = lines
+    .slice(2)
+    .filter(Boolean)
+    .map(parseRow);
+
+  return (
+    <div className="table-wrapper">
+      <table className="markdown-table">
+        <thead>
+          <tr>
+            {headers.map((header, index) => (
+              <th key={index}>
+                <span
+                  dangerouslySetInnerHTML={{
+                    __html: formatInline(header)
+                  }}
+                />
+              </th>
+            ))}
+          </tr>
+        </thead>
+
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>
+              {headers.map((_, cellIndex) => (
+                <td key={cellIndex}>
+                  <span
+                    dangerouslySetInnerHTML={{
+                      __html: formatInline(
+                        row[cellIndex] || ""
+                      )
+                    }}
+                  />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function renderText(text, onCopyCode) {
+  if (!text) return null;
+
+  const lines = text.replace(/\r/g, "").split("\n");
+  const output = [];
+
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (line.trim().startsWith("```")) {
+      const language =
+        line.trim().replace(/^```/, "").trim() ||
+        "code";
+
+      const codeLines = [];
+      i++;
+
+      while (
+        i < lines.length &&
+        !lines[i].trim().startsWith("```")
+      ) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+
+      const code = codeLines.join("\n");
+
+      output.push(
+        <div className="code-block" key={`code-${i}`}>
+          <div className="code-header">
+            <span>{language}</span>
+
+            <button
+              onClick={() => onCopyCode(code)}
+              type="button"
+            >
+              ⧉ Copy code
+            </button>
+          </div>
+
+          <pre>
+            <code>{code}</code>
+          </pre>
+        </div>
+      );
+
+      i++;
+      continue;
+    }
+
+    if (
+      line.includes("|") &&
+      i + 1 < lines.length &&
+      /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(
+        lines[i + 1]
+      )
+    ) {
+      const tableLines = [line, lines[i + 1]];
+      i += 2;
+
+      while (
+        i < lines.length &&
+        lines[i].includes("|") &&
+        lines[i].trim()
+      ) {
+        tableLines.push(lines[i]);
+        i++;
+      }
+
+      output.push(
+        <MarkdownTable
+          key={`table-${i}`}
+          lines={tableLines}
+        />
+      );
+
+      continue;
+    }
+
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      output.push(
+        <div
+          className="text-space"
+          key={`space-${i}`}
+        />
+      );
+
+      i++;
+      continue;
+    }
+
+    if (/^#{1,6}\s/.test(trimmed)) {
+      const heading = trimmed.replace(
+        /^#{1,6}\s/,
+        ""
+      );
+
+      output.push(
+        <div
+          className="formatted-heading"
+          key={`heading-${i}`}
+          dangerouslySetInnerHTML={{
+            __html: formatInline(heading)
+          }}
+        />
+      );
+
+      i++;
+      continue;
+    }
+
+    if (/^[-*+]\s/.test(trimmed)) {
+      const content = trimmed.replace(
+        /^[-*+]\s/,
+        ""
+      );
+
+      output.push(
+        <div
+          className="formatted-list"
+          key={`bullet-${i}`}
+        >
+          <span>•</span>
+
+          <span
+            dangerouslySetInnerHTML={{
+              __html: formatInline(content)
+            }}
+          />
+        </div>
+      );
+
+      i++;
+      continue;
+    }
+
+    if (/^\d+\.\s/.test(trimmed)) {
+      const number =
+        trimmed.match(/^\d+\./)?.[0] || "";
+
+      const content = trimmed.replace(
+        /^\d+\.\s/,
+        ""
+      );
+
+      output.push(
+        <div
+          className="formatted-list"
+          key={`number-${i}`}
+        >
+          <span>{number}</span>
+
+          <span
+            dangerouslySetInnerHTML={{
+              __html: formatInline(content)
+            }}
+          />
+        </div>
+      );
+
+      i++;
+      continue;
+    }
+
+    if (/^>\s?/.test(trimmed)) {
+      const quote = trimmed.replace(
+        /^>\s?/,
+        ""
+      );
+
+      output.push(
+        <div
+          className="formatted-quote"
+          key={`quote-${i}`}
+          dangerouslySetInnerHTML={{
+            __html: formatInline(quote)
+          }}
+        />
+      );
+
+      i++;
+      continue;
+    }
+
+    output.push(
+      <div
+        className="formatted-line"
+        key={`line-${i}`}
+        dangerouslySetInnerHTML={{
+          __html: formatInline(trimmed)
+        }}
+      />
+    );
+
+    i++;
+  }
+
+  return output;
+}
+
 export default function Home() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [dark, setDark] = useState(true);
   const [copied, setCopied] = useState(null);
-  const [lastUserMessage, setLastUserMessage] = useState("");
   const [error, setError] = useState("");
+
   const bottomRef = useRef(null);
   const abortRef = useRef(null);
 
@@ -34,7 +343,10 @@ export default function Home() {
 
   useEffect(() => {
     try {
-      localStorage.setItem("chalu-messages", JSON.stringify(messages));
+      localStorage.setItem(
+        "chalu-messages",
+        JSON.stringify(messages)
+      );
     } catch {}
 
     bottomRef.current?.scrollIntoView({
@@ -43,7 +355,8 @@ export default function Home() {
   }, [messages, loading]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    document.documentElement.dataset.theme =
+      dark ? "dark" : "light";
   }, [dark]);
 
   async function sendMessage(text = input) {
@@ -52,7 +365,6 @@ export default function Home() {
     if (!value || loading) return;
 
     setError("");
-    setLastUserMessage(value);
 
     const next = [
       ...messages,
@@ -84,7 +396,9 @@ export default function Home() {
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || "Request failed.");
+        throw new Error(
+          data.error || "Request failed."
+        );
       }
 
       setMessages((current) => [
@@ -95,11 +409,11 @@ export default function Home() {
         }
       ]);
     } catch (err) {
-      if (err.name === "AbortError") {
-        return;
-      }
+      if (err?.name === "AbortError") return;
 
-      const message = err?.message || "Something went wrong.";
+      const message =
+        err?.message ||
+        "Something went wrong.";
 
       setError(message);
 
@@ -118,15 +432,17 @@ export default function Home() {
 
   function stopGenerating() {
     abortRef.current?.abort();
+    abortRef.current = null;
     setLoading(false);
   }
 
   function newChat() {
     stopGenerating();
+
     setMessages([]);
     setInput("");
     setError("");
-    setLastUserMessage("");
+    setCopied(null);
 
     try {
       localStorage.removeItem("chalu-messages");
@@ -136,6 +452,7 @@ export default function Home() {
   async function copyMessage(text, index) {
     try {
       await navigator.clipboard.writeText(text);
+
       setCopied(index);
 
       setTimeout(() => {
@@ -144,17 +461,42 @@ export default function Home() {
     } catch {}
   }
 
+  async function copyCode(code) {
+    try {
+      await navigator.clipboard.writeText(code);
+    } catch {}
+  }
+
   async function regenerate(index) {
     if (loading) return;
 
-    const previousUser = [...messages]
+    const assistantMessage = messages[index];
+
+    if (
+      !assistantMessage ||
+      assistantMessage.role !== "assistant"
+    ) {
+      return;
+    }
+
+    const userIndex = [...messages]
       .slice(0, index)
+      .map((message, position) => ({
+        ...message,
+        position
+      }))
       .reverse()
-      .find((m) => m.role === "user");
+      .find(
+        (message) =>
+          message.role === "user"
+      )?.position;
 
-    if (!previousUser) return;
+    if (userIndex === undefined) return;
 
-    const history = messages.slice(0, index);
+    const history = messages.slice(
+      0,
+      userIndex + 1
+    );
 
     setMessages(history);
     setLoading(true);
@@ -178,7 +520,9 @@ export default function Home() {
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || "Request failed.");
+        throw new Error(
+          data.error || "Request failed."
+        );
       }
 
       setMessages((current) => [
@@ -189,9 +533,11 @@ export default function Home() {
         }
       ]);
     } catch (err) {
-      if (err.name === "AbortError") return;
+      if (err?.name === "AbortError") return;
 
-      const message = err?.message || "Something went wrong.";
+      const message =
+        err?.message ||
+        "Something went wrong.";
 
       setError(message);
 
@@ -208,52 +554,6 @@ export default function Home() {
     }
   }
 
-  function renderText(text) {
-    if (!text) return null;
-
-    const lines = text.split("\n");
-
-    return lines.map((line, i) => {
-      const trimmed = line.trim();
-
-      if (!trimmed) {
-        return <div className="text-space" key={i} />;
-      }
-
-      if (/^#{1,6}\s/.test(trimmed)) {
-        return (
-          <div className="formatted-heading" key={i}>
-            {trimmed.replace(/^#{1,6}\s/, "")}
-          </div>
-        );
-      }
-
-      if (/^[-*]\s/.test(trimmed)) {
-        return (
-          <div className="formatted-list" key={i}>
-            <span>•</span>
-            <span>{trimmed.replace(/^[-*]\s/, "")}</span>
-          </div>
-        );
-      }
-
-      if (/^\d+\.\s/.test(trimmed)) {
-        return (
-          <div className="formatted-list" key={i}>
-            <span>{trimmed.match(/^\d+\./)?.[0]}</span>
-            <span>{trimmed.replace(/^\d+\.\s/, "")}</span>
-          </div>
-        );
-      }
-
-      return (
-        <div key={i} className="formatted-line">
-          {trimmed}
-        </div>
-      );
-    });
-  }
-
   return (
     <main className="shell">
       <aside className="sidebar">
@@ -261,7 +561,10 @@ export default function Home() {
           <div className="brand-mark">C</div>
 
           <div>
-            <div className="brand-name">CHALU</div>
+            <div className="brand-name">
+              CHALU
+            </div>
+
             <div className="brand-sub">
               INTELLIGENCE, REFINED.
             </div>
@@ -314,18 +617,23 @@ export default function Home() {
         <header className="topbar">
           <div>
             <b>AI Assistant</b>
+
             <small>
               Private workspace · CHALU
             </small>
           </div>
 
-          <div className="avatar">S</div>
+          <div className="avatar">
+            S
+          </div>
         </header>
 
         <div className="conversation">
           {messages.length === 0 ? (
             <div className="welcome">
-              <div className="orb">C</div>
+              <div className="orb">
+                C
+              </div>
 
               <div className="eyebrow">
                 WELCOME TO CHALU
@@ -338,16 +646,19 @@ export default function Home() {
               </h1>
 
               <p>
-                A premium AI workspace for ideas,
-                writing, planning, analysis, and
-                everyday questions.
+                A premium AI workspace for
+                ideas, writing, planning,
+                analysis, and everyday
+                questions.
               </p>
 
               <div className="prompts">
                 {prompts.map((p) => (
                   <button
                     key={p}
-                    onClick={() => sendMessage(p)}
+                    onClick={() =>
+                      sendMessage(p)
+                    }
                   >
                     <span>↗</span>
                     {p}
@@ -359,7 +670,9 @@ export default function Home() {
             <div className="messages">
               {messages.map((m, i) => (
                 <div
-                  className={"message " + m.role}
+                  className={
+                    "message " + m.role
+                  }
                   key={i}
                 >
                   <div className="message-avatar">
@@ -376,17 +689,27 @@ export default function Home() {
                     </div>
 
                     <div className="text">
-                      {m.role === "assistant"
-                        ? renderText(m.content)
+                      {m.role ===
+                      "assistant"
+                        ? renderText(
+                            m.content,
+                            copyCode
+                          )
                         : m.content}
                     </div>
 
-                    {m.role === "assistant" &&
-                      !m.content.startsWith("⚠️") && (
+                    {m.role ===
+                      "assistant" &&
+                      !m.content.startsWith(
+                        "⚠️"
+                      ) && (
                         <div className="message-actions">
                           <button
                             onClick={() =>
-                              copyMessage(m.content, i)
+                              copyMessage(
+                                m.content,
+                                i
+                              )
                             }
                             title="Copy answer"
                           >
@@ -458,8 +781,8 @@ export default function Home() {
 
             <div className="composer-bottom">
               <span>
-                Enter to send · Shift + Enter for
-                new line
+                Enter to send · Shift + Enter
+                for new line
               </span>
 
               {loading ? (
@@ -472,7 +795,9 @@ export default function Home() {
                 </button>
               ) : (
                 <button
-                  onClick={() => sendMessage()}
+                  onClick={() =>
+                    sendMessage()
+                  }
                   disabled={!input.trim()}
                   title="Send message"
                 >
@@ -489,8 +814,9 @@ export default function Home() {
           )}
 
           <div className="disclaimer">
-            CHALU can make mistakes. Check important
-            information before relying on it.
+            CHALU can make mistakes. Check
+            important information before
+            relying on it.
           </div>
         </div>
       </section>
