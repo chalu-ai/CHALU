@@ -1,16 +1,16 @@
 import { NextResponse } from "next/server";
 
-const MODEL = "gemini-2.5-flash";
+const MODEL = "gemini-3.8-flash";
 
 const SYSTEM_PROMPT = `
-You are CHALU, a helpful and intelligent AI assistant.
+You are CHALU, a helpful, intelligent and reliable AI assistant.
 
 Rules:
-- Answer clearly and accurately.
+- Give clear and useful answers.
 - Match the user's language.
-- If the user writes Bangla, answer naturally in Bangla.
-- If the user writes Banglish, you may answer in Banglish.
-- Maintain conversation context.
+- If the user writes Bangla, reply naturally in Bangla.
+- If the user writes Banglish, you may reply in Banglish.
+- Maintain the conversation context.
 - Use Markdown when useful.
 - Support headings, bold text, bullet lists, numbered lists, code blocks and tables.
 `;
@@ -35,71 +35,51 @@ export async function POST(request) {
       );
     }
 
-    const contents = messages
-      .filter(
-        (message) =>
-          (message.role === "user" ||
-            message.role === "assistant") &&
-          typeof message.content === "string" &&
-          message.content.trim()
-      )
-      .map((message) => ({
+    const validMessages = messages.filter(
+      (message) =>
+        (message.role === "user" ||
+          message.role === "assistant") &&
+        typeof message.content === "string" &&
+        message.content.trim()
+    );
+
+    const input = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: SYSTEM_PROMPT
+          }
+        ]
+      },
+      ...validMessages.map((message) => ({
         role:
           message.role === "assistant"
             ? "model"
             : "user",
-        parts: [
+        content: [
           {
+            type: "text",
             text: message.content
               .trim()
               .slice(0, 12000)
           }
         ]
-      }));
-
-    if (!contents.length) {
-      return NextResponse.json(
-        { error: "No valid message found." },
-        { status: 400 }
-      );
-    }
-
-    // Make sure the conversation starts with a user message.
-    while (
-      contents.length > 0 &&
-      contents[0].role !== "user"
-    ) {
-      contents.shift();
-    }
-
-    // Remove trailing model message.
-    if (
-      contents.length > 0 &&
-      contents[contents.length - 1].role ===
-        "model"
-    ) {
-      contents.pop();
-    }
+      }))
+    ];
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`,
+      "https://generativelanguage.googleapis.com/v1beta/interactions",
       {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey
         },
         body: JSON.stringify({
-          systemInstruction: {
-            parts: [
-              {
-                text: SYSTEM_PROMPT
-              }
-            ]
-          },
-          contents,
-          generationConfig: {
-            maxOutputTokens: 2048
-          }
+          model: MODEL,
+          input
         }),
         cache: "no-store"
       }
@@ -112,21 +92,33 @@ export async function POST(request) {
         {
           error:
             data?.error?.message ||
+            data?.message ||
             `Gemini returned HTTP ${response.status}.`
         },
         { status: response.status }
       );
     }
 
-    const text = data?.candidates?.[0]?.content?.parts
-      ?.map((part) => part?.text || "")
-      .join("")
-      .trim();
+    const text =
+      data?.outputs
+        ?.filter(
+          (output) =>
+            output?.type === "text"
+        )
+        ?.map(
+          (output) =>
+            output?.text || ""
+        )
+        ?.join("")
+        ?.trim() ||
+      data?.output_text?.trim() ||
+      "";
 
     if (!text) {
       return NextResponse.json(
         {
-          error: "Gemini returned an empty response."
+          error:
+            "Gemini returned an empty response."
         },
         { status: 502 }
       );
