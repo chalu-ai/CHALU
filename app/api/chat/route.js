@@ -2,10 +2,10 @@ import { NextResponse } from "next/server";
 
 const MODEL = "gemini-3.8-flash";
 
-const SYSTEM_PROMPT = `
+const SYSTEM_INSTRUCTION = `
 You are CHALU, a helpful and intelligent AI assistant.
 
-Answer clearly and accurately.
+Give clear and useful answers.
 Match the user's language.
 If the user writes Bangla, answer naturally in Bangla.
 If the user writes Banglish, you may answer in Banglish.
@@ -19,21 +19,29 @@ export async function POST(request) {
 
     if (!apiKey) {
       return NextResponse.json(
-        { error: "Gemini API key is not configured." },
+        {
+          error: "Gemini API key is not configured."
+        },
         { status: 500 }
       );
     }
 
-    const { messages } = await request.json();
+    const body = await request.json();
+    const messages = body?.messages;
 
-    if (!Array.isArray(messages) || messages.length === 0) {
+    if (
+      !Array.isArray(messages) ||
+      messages.length === 0
+    ) {
       return NextResponse.json(
-        { error: "Please enter a message." },
+        {
+          error: "Please enter a message."
+        },
         { status: 400 }
       );
     }
 
-    const steps = [];
+    const input = [];
 
     for (const message of messages) {
       if (
@@ -44,15 +52,76 @@ export async function POST(request) {
         continue;
       }
 
-      steps.push({
-        type: "text",
-        text: message.content.trim().slice(0, 12000)
-      });
+      if (message.role === "user") {
+        input.push({
+          type: "user_input",
+          content: [
+            {
+              type: "text",
+              text: message.content
+                .trim()
+                .slice(0, 12000)
+            }
+          ]
+        });
+      }
+
+      if (message.role === "assistant") {
+        input.push({
+          type: "model_output",
+          content: [
+            {
+              type: "text",
+              text: message.content
+                .trim()
+                .slice(0, 12000)
+            }
+          ]
+        });
+      }
     }
 
-    if (!steps.length) {
+    if (!input.length) {
       return NextResponse.json(
-        { error: "No valid message found." },
+        {
+          error: "No valid message found."
+        },
+        { status: 400 }
+      );
+    }
+
+    // Remove anything before the first user message.
+    const firstUserIndex = input.findIndex(
+      (item) => item.type === "user_input"
+    );
+
+    const history =
+      firstUserIndex >= 0
+        ? input.slice(firstUserIndex)
+        : [];
+
+    if (!history.length) {
+      return NextResponse.json(
+        {
+          error: "No user message found."
+        },
+        { status: 400 }
+      );
+    }
+
+    // The last item must be the user's new message.
+    if (
+      history[history.length - 1].type !==
+      "user_input"
+    ) {
+      history.pop();
+    }
+
+    if (!history.length) {
+      return NextResponse.json(
+        {
+          error: "No current user message found."
+        },
         { status: 400 }
       );
     }
@@ -67,12 +136,12 @@ export async function POST(request) {
         },
         body: JSON.stringify({
           model: MODEL,
-
-          system_instruction: SYSTEM_PROMPT,
-
-          input: {
-            type: "step_list",
-            steps
+          system_instruction:
+            SYSTEM_INSTRUCTION,
+          input: history,
+          generation_config: {
+            max_output_tokens: 2048,
+            thinking_level: "low"
           }
         }),
         cache: "no-store"
@@ -95,26 +164,39 @@ export async function POST(request) {
 
     let text = "";
 
-    if (Array.isArray(data?.outputs)) {
-      text = data.outputs
-        .filter(
-          (item) =>
-            item?.type === "text" &&
-            typeof item?.text === "string"
-        )
-        .map((item) => item.text)
-        .join("")
-        .trim();
+    if (Array.isArray(data?.steps)) {
+      const outputStep = [...data.steps]
+        .reverse()
+        .find(
+          (step) =>
+            step?.type === "model_output"
+        );
+
+      if (Array.isArray(outputStep?.content)) {
+        text = outputStep.content
+          .filter(
+            (part) =>
+              part?.type === "text" &&
+              typeof part?.text === "string"
+          )
+          .map((part) => part.text)
+          .join("")
+          .trim();
+      }
     }
 
-    if (!text && typeof data?.output_text === "string") {
+    if (
+      !text &&
+      typeof data?.output_text === "string"
+    ) {
       text = data.output_text.trim();
     }
 
     if (!text) {
       return NextResponse.json(
         {
-          error: "Gemini returned an empty response."
+          error:
+            "Gemini returned an empty response."
         },
         { status: 502 }
       );
