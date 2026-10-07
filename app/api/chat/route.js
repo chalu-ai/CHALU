@@ -1,10 +1,6 @@
 import { NextResponse } from "next/server";
 
-const MODELS = [
-  "gemini-3.8-flash",
-  "gemini-3.7-flash",
-  "gemini-3.6-flash",
-];
+const MODEL = "gemini-3.8-flash";
 
 const SYSTEM_PROMPT = `
 You are CHALU, a helpful, intelligent and reliable AI assistant.
@@ -15,11 +11,68 @@ Rules:
 - If the user writes Bangla, reply naturally in Bangla.
 - If the user writes Banglish, you may reply in Banglish.
 - Be concise for simple questions and detailed when necessary.
-- Do not pretend to know something you do not know.
+- Support Markdown formatting when useful, including headings, bold text, bullet lists, numbered lists, code blocks and tables.
 - Maintain the conversation context.
+- Do not pretend to know something you do not know.
 `;
 
 const REQUEST_TIMEOUT = 30000;
+
+function buildContents(messages) {
+  const valid = messages
+    .filter(
+      (message) =>
+        (message.role === "user" ||
+          message.role === "assistant") &&
+        typeof message.content === "string" &&
+        message.content.trim()
+    )
+    .map((message) => ({
+      role:
+        message.role === "assistant"
+          ? "model"
+          : "user",
+      text: message.content.trim().slice(0, 20000)
+    }));
+
+  const contents = [];
+
+  for (const message of valid) {
+    const last = contents[contents.length - 1];
+
+    if (last && last.role === message.role) {
+      last.parts[0].text += "\n\n" + message.text;
+    } else {
+      contents.push({
+        role: message.role,
+        parts: [
+          {
+            text: message.text
+          }
+        ]
+      });
+    }
+  }
+
+  // Gemini conversations should start with a user turn.
+  while (
+    contents.length &&
+    contents[0].role !== "user"
+  ) {
+    contents.shift();
+  }
+
+  // Never send an incomplete trailing model turn.
+  if (
+    contents.length &&
+    contents[contents.length - 1].role ===
+      "model"
+  ) {
+    contents.pop();
+  }
+
+  return contents;
+}
 
 export async function POST(request) {
   try {
@@ -28,7 +81,8 @@ export async function POST(request) {
     if (!apiKey) {
       return NextResponse.json(
         {
-          error: "Gemini API key is not configured in Vercel."
+          error:
+            "Gemini API key is not configured in Vercel."
         },
         { status: 500 }
       );
@@ -37,7 +91,10 @@ export async function POST(request) {
     const body = await request.json();
     const messages = body?.messages;
 
-    if (!Array.isArray(messages) || messages.length === 0) {
+    if (
+      !Array.isArray(messages) ||
+      messages.length === 0
+    ) {
       return NextResponse.json(
         {
           error: "Please enter a message."
@@ -46,137 +103,112 @@ export async function POST(request) {
       );
     }
 
-    const contents = messages
-      .filter(
-        (message) =>
-          (message.role === "user" ||
-            message.role === "assistant") &&
-          typeof message.content === "string" &&
-          message.content.trim()
-      )
-      .map((message) => ({
-        role:
-          message.role === "assistant"
-            ? "model"
-            : "user",
-        parts: [
-          {
-            text: message.content.slice(0, 20000)
-          }
-        ]
-      }));
+    const contents = buildContents(messages);
 
     if (contents.length === 0) {
       return NextResponse.json(
         {
-          error: "No valid message was received."
+          error:
+            "No valid conversation messages were received."
         },
         { status: 400 }
       );
     }
 
-    let lastError = "Gemini request failed.";
+    const controller = new AbortController();
 
-    for (const model of MODELS) {
-      const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, REQUEST_TIMEOUT);
 
-      const timeout = setTimeout(() => {
-        controller.abort();
-      }, REQUEST_TIMEOUT);
+    try {
+      const url =
+        `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent` +
+        `?key=${encodeURIComponent(apiKey)}`;
 
-      try {
-        const url =
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent` +
-          `?key=${encodeURIComponent(apiKey)}`;
-
-        const response = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [
+              {
+                text: SYSTEM_PROMPT
+              }
+            ]
           },
-          signal: controller.signal,
-          body: JSON.stringify({
-            systemInstruction: {
-              parts: [
-                {
-                  text: SYSTEM_PROMPT
-                }
-              ]
-            },
 
-            contents,
+          contents,
 
-            generationConfig: {
-              maxOutputTokens: 4096
-            }
-          })
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-          lastError =
-            data?.error?.message ||
-            `Gemini returned HTTP ${response.status}.`;
-
-          if (
-            response.status === 429 ||
-            response.status === 500 ||
-            response.status === 502 ||
-            response.status === 503 ||
-            response.status === 504
-          ) {
-            continue;
+          generationConfig: {
+            maxOutputTokens: 4096
           }
+        })
+      });
 
-          return NextResponse.json(
-            {
-              error: lastError,
-              model
-            },
-            {
-              status: response.status
-            }
-          );
-        }
+      const data = await response.json();
 
-        const text =
-          data?.candidates?.[0]?.content?.parts
-            ?.map((part) => part?.text || "")
-            .join("")
-            .trim();
+      if (!response.ok) {
+        const errorMessage =
+          data?.error?.message ||
+          `Gemini returned HTTP ${response.status}.`;
 
-        if (text) {
-          return NextResponse.json({
-            text,
-            model
-          });
-        }
-
-        lastError =
-          "Gemini returned an empty response.";
-      } catch (error) {
-        if (error?.name === "AbortError") {
-          lastError =
-            `${model} timed out after 30 seconds.`;
-        } else {
-          lastError =
-            error?.message ||
-            "Unexpected Gemini error.";
-        }
-      } finally {
-        clearTimeout(timeout);
+        return NextResponse.json(
+          {
+            error: errorMessage,
+            status: response.status
+          },
+          {
+            status: response.status
+          }
+        );
       }
-    }
 
-    return NextResponse.json(
-      {
-        error:
-          "CHALU could not get a response from Gemini.",
-        details: lastError
-      },
-      { status: 503 }
-    );
+      const text =
+        data?.candidates?.[0]?.content?.parts
+          ?.map((part) => part?.text || "")
+          .join("")
+          .trim();
+
+      if (!text) {
+        return NextResponse.json(
+          {
+            error:
+              "Gemini returned an empty response."
+          },
+          { status: 502 }
+        );
+      }
+
+      return NextResponse.json({
+        text,
+        model: MODEL
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        return NextResponse.json(
+          {
+            error:
+              "Gemini request timed out after 30 seconds."
+          },
+          { status: 504 }
+        );
+      }
+
+      return NextResponse.json(
+        {
+          error:
+            error?.message ||
+            "Unable to connect to Gemini."
+        },
+        { status: 500 }
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch (error) {
     return NextResponse.json(
       {
