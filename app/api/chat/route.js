@@ -3,16 +3,14 @@ import { NextResponse } from "next/server";
 const MODEL = "gemini-3.8-flash";
 
 const SYSTEM_PROMPT = `
-You are CHALU, a helpful, intelligent and reliable AI assistant.
+You are CHALU, a helpful and intelligent AI assistant.
 
-Rules:
-- Give clear and useful answers.
-- Match the user's language.
-- If the user writes Bangla, reply naturally in Bangla.
-- If the user writes Banglish, you may reply in Banglish.
-- Maintain the conversation context.
-- Use Markdown when useful.
-- Support headings, bold text, bullet lists, numbered lists, code blocks and tables.
+Answer clearly and accurately.
+Match the user's language.
+If the user writes Bangla, answer naturally in Bangla.
+If the user writes Banglish, you may answer in Banglish.
+Maintain conversation context.
+Use Markdown when useful.
 `;
 
 export async function POST(request) {
@@ -35,39 +33,29 @@ export async function POST(request) {
       );
     }
 
-    const validMessages = messages.filter(
-      (message) =>
-        (message.role === "user" ||
-          message.role === "assistant") &&
-        typeof message.content === "string" &&
-        message.content.trim()
-    );
+    const steps = [];
 
-    const input = [
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: SYSTEM_PROMPT
-          }
-        ]
-      },
-      ...validMessages.map((message) => ({
-        role:
-          message.role === "assistant"
-            ? "model"
-            : "user",
-        content: [
-          {
-            type: "text",
-            text: message.content
-              .trim()
-              .slice(0, 12000)
-          }
-        ]
-      }))
-    ];
+    for (const message of messages) {
+      if (
+        !message ||
+        typeof message.content !== "string" ||
+        !message.content.trim()
+      ) {
+        continue;
+      }
+
+      steps.push({
+        type: "text",
+        text: message.content.trim().slice(0, 12000)
+      });
+    }
+
+    if (!steps.length) {
+      return NextResponse.json(
+        { error: "No valid message found." },
+        { status: 400 }
+      );
+    }
 
     const response = await fetch(
       "https://generativelanguage.googleapis.com/v1beta/interactions",
@@ -79,7 +67,13 @@ export async function POST(request) {
         },
         body: JSON.stringify({
           model: MODEL,
-          input
+
+          system_instruction: SYSTEM_PROMPT,
+
+          input: {
+            type: "step_list",
+            steps
+          }
         }),
         cache: "no-store"
       }
@@ -99,26 +93,28 @@ export async function POST(request) {
       );
     }
 
-    const text =
-      data?.outputs
-        ?.filter(
-          (output) =>
-            output?.type === "text"
+    let text = "";
+
+    if (Array.isArray(data?.outputs)) {
+      text = data.outputs
+        .filter(
+          (item) =>
+            item?.type === "text" &&
+            typeof item?.text === "string"
         )
-        ?.map(
-          (output) =>
-            output?.text || ""
-        )
-        ?.join("")
-        ?.trim() ||
-      data?.output_text?.trim() ||
-      "";
+        .map((item) => item.text)
+        .join("")
+        .trim();
+    }
+
+    if (!text && typeof data?.output_text === "string") {
+      text = data.output_text.trim();
+    }
 
     if (!text) {
       return NextResponse.json(
         {
-          error:
-            "Gemini returned an empty response."
+          error: "Gemini returned an empty response."
         },
         { status: 502 }
       );
